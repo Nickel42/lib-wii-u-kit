@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>lib-wii-u-kit</AssemblyName>
+    <PackageId>lib-wii-u-kit</PackageId>
+    <RootNamespace>LibWiiUKit</RootNamespace>
+    <Description>Convert Wii U games to Cemu's .wua (ZArchive) from .NET on Windows, macOS, Linux and Android: extracted title folders, NUS titles, WUD/WUX disc images and other .wua files, merged into one verified archive per game with its newest update and DLC. Reads and writes ZArchive. Pure managed code, no native libraries; decryption uses your own keys.txt.</Description>
+    <PackageTags>wiiu;wii-u;wua;zarchive;cemu;wud;wux;nus;android</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="lib-wii-u-kit.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../LICENSE" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+</Project>

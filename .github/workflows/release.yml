@@ -1,0 +1,42 @@
+name: Release
+
+# Push a tag such as v1.0.0 to publish: runs CI with that version, attaches the
+# NuGet package to a GitHub release, and pushes it to nuget.org when the
+# NUGET_API_KEY repository secret is set.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ github.ref_name }}
+
+  release:
+    name: GitHub release
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: packages
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          pre=""; [[ "$TAG" == *-* ]] && pre="--prerelease"
+          gh release create "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes $pre
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Push to nuget.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        if: env.NUGET_API_KEY != ''
+        run: dotnet nuget push "packages/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate

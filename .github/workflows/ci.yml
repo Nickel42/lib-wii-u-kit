@@ -1,0 +1,98 @@
+name: CI
+
+# Runs the tests on Windows, macOS and Linux (x64 and ARM64) under .NET 8 and 10,
+# builds the Android sample, and packs the NuGet package. The library is pure
+# managed code, so there is nothing native to build. Started by hand;
+# release.yml reuses it for tags.
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          # .NET 8 runtime for the net8.0 test run; the .NET 10 SDK builds everything.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Test (net8.0 and net10.0)
+        run: dotnet test tests/lib-wii-u-kit.Tests -c Release --logger "trx;LogFilePrefix=${{ matrix.os }}"
+      - name: Both target frameworks ran
+        shell: bash
+        run: |
+          n="$(ls tests/lib-wii-u-kit.Tests/TestResults/*.trx | wc -l)"
+          [ "$n" -ge 2 ] || { echo "expected test results for net8.0 and net10.0, found $n"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.os }}
+          path: "**/TestResults/*.trx"
+          if-no-files-found: ignore
+
+  android:
+    name: Android app build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install the Android workload
+        run: dotnet workload install android
+      - name: Build (Release, trimmed)
+        run: dotnet build samples/AndroidSmoke/AndroidSmoke.csproj -c Release
+      - name: An APK was built
+        run: |
+          apk="$(find samples/AndroidSmoke/bin/Release -name '*-Signed.apk' | head -1)"
+          [ -n "$apk" ] || { echo "no signed APK"; exit 1; }
+          ls -l "$apk"
+
+  pack:
+    name: Pack
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Pack
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${VERSION#v}"
+          dotnet pack src/lib-wii-u-kit -c Release -o artifacts/packages ${VERSION:+-p:Version=$VERSION}
+      - name: Both target frameworks are in the package
+        run: |
+          unzip -l "$(ls artifacts/packages/*.nupkg | grep -v snupkg | head -1)" | tee nupkg.txt
+          for f in lib/net8.0/lib-wii-u-kit.dll lib/net10.0/lib-wii-u-kit.dll README.md LICENSE; do
+            grep -q "$f" nupkg.txt || { echo "missing $f"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifacts/packages/*
