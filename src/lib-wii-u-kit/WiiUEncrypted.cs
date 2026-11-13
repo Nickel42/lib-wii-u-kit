@@ -47,9 +47,10 @@ public static partial class WiiUEncrypted
         var source = new NusSource(folder, tmd.Contents);
         try
         {
-            if (keys.Keys.Count == 0) throw new WiiUKeysMissingException(NoKeys);
+            if (keys.IsEmpty) throw new WiiUKeysMissingException(NoKeys);
             var titleKey = WiiUTicket.FindTitleKey(ticket, keys, source)
-                ?? throw new KeyNotFoundException($"None of the {keys.Keys.Count} key(s) in keys.txt decrypts title {tmd.TitleId:X16}. Add the Wii U common key or this title's key.");
+                ?? throw new KeyNotFoundException($"None of the {keys.Keys.Count} key(s) in keys.txt decrypts title {tmd.TitleId:X16}" +
+                    $"{(keys.TitleKeys.Count > 0 ? $", and it has no title key for it among {keys.TitleKeys.Count}" : "")}. Add the Wii U common key or this title's key.");
             var volume = FstVolume.Open(source, titleKey, tmd.Contents[0].Size);
             return new EncryptedTitle(volume, tmd.TitleId, tmd.Version, "NUS", tmd.Contents);
         }

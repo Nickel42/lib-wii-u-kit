@@ -298,12 +298,14 @@ public static class WiiUTicket
     }
 
     /// <summary>
-    /// Finds the title key for a ticket by trying every key from keys.txt
-    /// as the common key (decrypting the ticket's title key) and as the title
-    /// key itself; the one that decrypts the FST to its magic wins.
+    /// Finds the title key for a ticket: the key listed for this title (a
+    /// "title ID + key" line) first, then every key from keys.txt as the
+    /// common key (decrypting the ticket's title key) and as the title key
+    /// itself; the one that decrypts the FST to its magic wins.
     /// </summary>
     internal static byte[]? FindTitleKey(Ticket ticket, WiiUKeys keys, IClusterSource source)
     {
+        if (keys.TitleKeys.TryGetValue(ticket.TitleId, out var listed) && FstVolume.KeyFits(source, listed)) return listed;
         var iv = WiiUCrypto.TitleIdIv(ticket.TitleId);
         foreach (var key in keys.Keys)
         {
