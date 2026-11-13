@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Title key lists in keys.txt:** a line holding a 16-digit title ID and that
+  title's 32-digit key is now read, not reported. Those keys are kept by title
+  (`WiiUKeys.TitleKeys`) and tried first for their own title, so a NUS title opens
+  with just its title key. `WiiUKeys.IsEmpty` covers both kinds of key, and
+  `Describe()` counts the title keys.
+- **One problem per keys.txt:** lines that aren't keys are reported in a single
+  message per file (how many, and the first five line numbers), not one per line.
+
 ## 1.0.0-rc.1 (2026-10-31)
 
 First release, extracted from NoIntrovert's Wii U converter.

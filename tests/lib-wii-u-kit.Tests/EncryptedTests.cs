@@ -40,11 +40,64 @@ public sealed class EncryptedTests(Samples s) : IDisposable
         Assert.Equal(2, k.Keys.Count);
         Assert.Equal(s.EncKeys.Common, k.Keys[0]);
         Assert.Equal(s.EncKeys.Disc, k.Keys[1]);
-        Assert.Equal(2, k.Problems.Count);
-        Assert.Contains("line 6", k.Problems[0]);
-        Assert.Contains("line 7", k.Problems[1]);
+        // Lines that aren't keys are reported once per file, not once per line.
+        var problem = Assert.Single(k.Problems);
+        Assert.Contains("2 lines aren't keys", problem);
+        Assert.Contains("lines 6, 7", problem);
         Assert.Equal([path], k.Files);
         Assert.Contains("2 key(s)", k.Describe());
+    }
+
+    [Fact]
+    public void Keys_txt_one_bad_line_names_it_and_many_are_summed_up()
+    {
+        var one = Path.Combine(_scratch.Root, "keys-one.txt");
+        File.WriteAllText(one, $"{Convert.ToHexString(s.EncKeys.Common)}\nnot-a-key\n");
+        Assert.Equal("keys-one.txt line 2 isn't a key (32 hex digits, or a 16-digit title ID and its 32-digit key).", Assert.Single(WiiUKeys.Load(one).Problems));
+
+        var many = Path.Combine(_scratch.Root, "keys-many.txt");
+        File.WriteAllLines(many, Enumerable.Range(0, 3000).Select(i => $"junk {i}"));
+        var problem = Assert.Single(WiiUKeys.Load(many).Problems);
+        Assert.Contains("3000 lines aren't keys", problem);
+        Assert.EndsWith("lines 1, 2, 3, 4, 5 and 2995 more.", problem);
+    }
+
+    [Fact]
+    public void Keys_txt_title_key_lines_are_kept_by_title()
+    {
+        // A title key list's lines: title ID, a tab, the title's key, then the name and region.
+        var path = Path.Combine(_scratch.Root, "keys-titles.txt");
+        File.WriteAllText(path,
+            $"{Convert.ToHexString(s.EncKeys.Common)} # common\n" +
+            $"{Samples.EncBase:X16}\t{Convert.ToHexString(s.EncKeys.Title)}#\tEncrypted Game\tUSA\n" +
+            $"{Samples.EncBase:X16} {Convert.ToHexString(s.EncKeys.Disc)} # a second key for the same title: the first wins\n" +
+            $"0005000E10303E00 {Convert.ToHexString(s.EncKeys.Disc)}\n");
+        var k = WiiUKeys.Load(path);
+        Assert.Empty(k.Problems);
+        Assert.Equal(s.EncKeys.Common, Assert.Single(k.Keys));
+        Assert.Equal(2, k.TitleKeys.Count);
+        Assert.Equal(s.EncKeys.Title, k.TitleKeys[Samples.EncBase]);
+        Assert.Equal("1 key(s) and 2 title key(s) from " + path, k.Describe());
+        Assert.False(k.IsEmpty);
+    }
+
+    [Fact]
+    public void Nus_title_opens_with_only_its_title_key_listed()
+    {
+        // No common key at all: the title's own key, from a title key line, is enough.
+        var path = Path.Combine(_scratch.Root, "keys-title-only.txt");
+        File.WriteAllText(path, $"{Samples.EncBase:X16}\t{Convert.ToHexString(s.EncKeys.Title)}\t# Encrypted Game\n");
+        var keys = WiiUKeys.Load(path);
+        Assert.Empty(keys.Keys);
+        var t = Assert.Single(WiiUTitles.Read(s.NusGame, keys));
+        Assert.Equal(Samples.EncBase, t.TitleId);
+        Assert.Equal("Encrypted Game", t.Name);
+
+        // Another title's key isn't tried for this one, and the message says so.
+        var other = Path.Combine(_scratch.Root, "keys-other-title.txt");
+        File.WriteAllText(other, $"0005000010101C00\t{Convert.ToHexString(s.EncKeys.Title)}\n");
+        var ex = Assert.ThrowsAny<KeyNotFoundException>(() => WiiUTitles.Read(s.NusGame, WiiUKeys.Load(other)));
+        Assert.Contains("no title key for it among 1", ex.Message);
     }
 
     [Fact]

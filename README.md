@@ -93,6 +93,12 @@ anything after `#` or `;` is a comment, and spaces, tabs, `-` and `_` are
 ignored. Which key is which doesn't matter; each is tried as a disc key, the
 common key or a title key.
 
+A line can also come from a title key list: a 16-digit title ID, then that
+title's 32-digit key (`0005000010101C00<tab><key>  # Game  USA`). Those keys are
+kept by title (`WiiUKeys.TitleKeys`) and tried first for their own title, so a
+title opens with its key even without the common key. Lines that are neither
+are reported once per file in `WiiUKeys.Problems`, with the first few line numbers.
+
 `WiiUKeys.Load(path, searchPaths)` loads `path` when given; otherwise every
 keys.txt that exists in `searchPaths`, which defaults to Cemu's user-data folder
 (`WiiUKeys.DefaultLocations()`: `%APPDATA%\Cemu\keys.txt` on Windows,
