@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Dependency:** ZstdSharp.Port 0.8.6 → 0.8.8 (bug fixes).
 - **Title key lists in keys.txt:** a line holding a 16-digit title ID and that
   title's 32-digit key is now read, not reported. Those keys are kept by title
   (`WiiUKeys.TitleKeys`) and tried first for their own title, so a NUS title opens
