@@ -130,7 +130,9 @@ public sealed partial class ZArchiveReader
             var slot = (int)(i % ZArchiveFormat.EntriesPerOffsetRecord);
             if (slot == 0 && BinaryPrimitives.ReadUInt64BigEndian(r) != expected) return null;
             var size = BinaryPrimitives.ReadUInt16BigEndian(r[(8 + 2 * slot)..]) + 1;
-            if (expected + (ulong)size > _dataSize) throw new ZArchiveException("A compressed block lies outside the archive's data.");
+            // The footer bound matters too: the pass below hashes what follows the blocks up to the footer.
+            if (expected + (ulong)size > _dataSize || expected + (ulong)size > (ulong)Length - ZArchiveFormat.FooterSize)
+                throw new ZArchiveException("A compressed block lies outside the archive's data.");
             blocks[i] = (expected, size);
             expected += (ulong)size;
         }
