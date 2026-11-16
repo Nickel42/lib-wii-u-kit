@@ -76,6 +76,47 @@ public sealed class ZArchiveTests : IDisposable
     }
 
     [Fact]
+    public void HashFiles_hashes_every_file_in_one_pass()
+    {
+        var (archive, files) = Write();
+        using var r = ZArchiveReader.Open(archive);
+        long read = 0;
+        var found = r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA1, n => read += n);
+        Assert.True(found.IntegrityOk);
+        Assert.Equal(r.Length, read);
+        Assert.Equal(files.Count, found.Files.Count);
+        foreach (var (path, data) in files)
+            Assert.Equal(System.Security.Cryptography.SHA1.HashData(data), found.Files[path.Replace("B/", "b/")]);
+
+        var bytes = File.ReadAllBytes(archive);
+        bytes[1000] ^= 0x40; // inside b/Zeta.bin's first block, stored raw
+        var bad = Path.Combine(_scratch.Root, "bad.zar");
+        File.WriteAllBytes(bad, bytes);
+        using var rb = ZArchiveReader.Open(bad);
+        var damaged = rb.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        Assert.False(damaged.IntegrityOk);
+        Assert.NotEqual(System.Security.Cryptography.SHA256.HashData(files["b/Zeta.bin"]), damaged.Files["b/Zeta.bin"]);
+    }
+
+    [Fact]
+    public void HashFiles_handles_archives_of_empty_files()
+    {
+        var path = Path.Combine(_scratch.Root, "empty.zar");
+        using (var w = new ZArchiveWriter(path))
+        {
+            w.AddFile("a", Stream.Null);
+            w.AddDirectory("d");
+            w.AddFile("d/b", Stream.Null);
+            w.Finish();
+        }
+        using var r = ZArchiveReader.Open(path);
+        var found = r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        Assert.True(found.IntegrityOk);
+        Assert.Equal(System.Security.Cryptography.SHA256.HashData([]), found.Files["d/b"]);
+        Assert.Equal(2, found.Files.Count);
+    }
+
+    [Fact]
     public void Find_is_case_insensitive()
     {
         var (archive, _) = Write();
