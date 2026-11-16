@@ -272,12 +272,14 @@ public static partial class WiiUEncrypted
 
     internal static void ReadPadded(Stream stream, long offset, Span<byte> buffer)
     {
-        buffer.Clear();
-        if (offset >= stream.Length) return;
-        stream.Position = offset;
         var got = 0;
-        int n;
-        while (got < buffer.Length && (n = stream.Read(buffer[got..])) > 0) got += n;
+        if (offset < stream.Length)
+        {
+            stream.Position = offset;
+            int n;
+            while (got < buffer.Length && (n = stream.Read(buffer[got..])) > 0) got += n;
+        }
+        buffer[got..].Clear(); // past the end reads as zero
     }
 }
 
@@ -376,6 +378,9 @@ internal sealed class DiscImage : IDisposable
             var within = (int)(offset % _wuxSectorSize);
             var take = Math.Min(buffer.Length, _wuxSectorSize - within);
             var stored = _wuxIndex[sector];
+            // Sectors stored one after another (all but repeated ones, usually) are read in one go.
+            for (var next = sector + 1; take < buffer.Length && next < _wuxIndex.Length && _wuxIndex[next] == _wuxIndex[next - 1] + 1; next++)
+                take = (int)Math.Min(buffer.Length, take + (long)_wuxSectorSize);
             ReadRaw(_wuxDataStart + (long)stored * _wuxSectorSize + within, buffer[..take]);
             buffer = buffer[take..];
             offset += take;

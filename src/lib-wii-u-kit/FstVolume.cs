@@ -44,6 +44,8 @@ public sealed class FstVolume : IDisposable
     private const int HashedBlock = 0x10000;
     private const int HashArea = 0x400;
     private const int HashedData = HashedBlock - HashArea; // 0xFC00
+    private const int RawRun = 32;    // raw sectors decrypted at a time: 1 MiB
+    private const int HashedRun = 16; // hashed blocks read at a time (1 MiB), decrypted and checked in parallel
 
     private sealed record Cluster(long Offset, long Size, ulong OwnerTitleId, int HashMode);
 
@@ -160,30 +162,37 @@ public sealed class FstVolume : IDisposable
         return ms.ToArray();
     }
 
+    // Reused between calls: a volume is read by one thread at a time.
+    private byte[]? _cipher;
+    private byte[]? _plain;
+
     /// <summary>Decrypts a file to <paramref name="destination"/>; hashed clusters are checked block by block.</summary>
     public void Copy(FstEntry file, Stream destination, Action<long>? progress, CancellationToken token)
     {
         if (file.IsDirectory) throw new ArgumentException("Not a file.", nameof(file));
-        var cluster = _clusters[file.Cluster];
-        var hashed = cluster.HashMode == 2;
+        var hashed = _clusters[file.Cluster].HashMode == 2;
         var unit = hashed ? HashedData : RawSector;
-        var block = new byte[hashed ? HashedBlock : RawSector];
-        var plain = new byte[unit];
-        long cachedIndex = -1;
+        var cipher = _cipher ??= new byte[16 + RawRun * RawSector];
+        var plain = _plain ??= new byte[RawRun * RawSector];
+        long runStart = 0, runEnd = 0; // the units decrypted in plain
         var position = file.Offset;
         var remaining = file.Size;
         while (remaining > 0)
         {
             token.ThrowIfCancellationRequested();
             var index = position / unit;
-            if (index != cachedIndex)
+            if (index < runStart || index >= runEnd)
             {
-                if (hashed) DecryptHashed(file.Cluster, index, block, plain);
-                else DecryptRaw(file.Cluster, index, block, plain);
-                cachedIndex = index;
+                // As many units as the rest of the file needs, up to one run: small files stay one unit.
+                var lastIndex = (position + remaining - 1) / unit;
+                var count = (int)Math.Min(lastIndex - index + 1, hashed ? HashedRun : RawRun);
+                if (hashed) DecryptHashed(file.Cluster, index, count, cipher, plain);
+                else DecryptRaw(file.Cluster, index, count, cipher, plain);
+                runStart = index;
+                runEnd = index + count;
             }
-            var within = (int)(position % unit);
-            var take = (int)Math.Min(unit - within, remaining);
+            var within = (int)((index - runStart) * unit + position % unit);
+            var take = (int)Math.Min((runEnd - runStart) * unit - within, remaining);
             destination.Write(plain, within, take);
             progress?.Invoke(take);
             position += take;
@@ -191,34 +200,77 @@ public sealed class FstVolume : IDisposable
         }
     }
 
-    private void DecryptRaw(int cluster, long index, byte[] buffer, byte[] plain)
+    /// <summary>Decrypts <paramref name="count"/> raw sectors from <paramref name="first"/> on, read in one go.</summary>
+    private void DecryptRaw(int cluster, long first, int count, byte[] cipher, byte[] plain)
     {
         // One CBC stream per cluster: the first sector's IV is the cluster
         // index, every later sector's is the last 16 encrypted bytes before it.
+        var length = count * RawSector;
         Span<byte> iv = stackalloc byte[16];
         iv.Clear();
-        if (index == 0)
+        if (first == 0)
         {
             iv[0] = (byte)(cluster >> 8);
             iv[1] = (byte)cluster;
+            _source.Read(cluster, 0, cipher.AsSpan(16, length));
         }
         else
         {
-            _source.Read(cluster, index * RawSector - 16, iv);
+            _source.Read(cluster, first * RawSector - 16, cipher.AsSpan(0, 16 + length));
+            cipher.AsSpan(0, 16).CopyTo(iv);
         }
-        _source.Read(cluster, index * RawSector, buffer);
-        WiiUCrypto.DecryptCbc(_key, iv, buffer, plain);
+        WiiUCrypto.DecryptCbc(_key, iv, cipher.AsSpan(16, length), plain.AsSpan(0, length));
     }
 
-    private void DecryptHashed(int cluster, long index, byte[] buffer, byte[] plain)
+    /// <summary>
+    /// Decrypts and checks <paramref name="count"/> hashed blocks from
+    /// <paramref name="first"/> on: one read, then the blocks (each with its
+    /// own IV and hash) on several threads. Their data lands back to back in
+    /// <paramref name="plain"/>.
+    /// </summary>
+    private void DecryptHashed(int cluster, long first, int count, byte[] cipher, byte[] plain)
     {
-        _source.Read(cluster, index * HashedBlock, buffer);
-        var hashes = WiiUCrypto.DecryptCbc(_key, new byte[16], buffer.AsSpan(0, HashArea));
-        var h0 = hashes.AsSpan((int)(index % 16) * 20, 20);
-        WiiUCrypto.DecryptCbc(_key, h0[..16], buffer.AsSpan(HashArea), plain);
-        if (!SHA1.HashData(plain).AsSpan().SequenceEqual(h0))
-            throw new InvalidDataException($"Block {index} of cluster {cluster} fails its hash check: the dump is damaged or the wrong key was used.");
+        _source.Read(cluster, first * HashedBlock, cipher.AsSpan(0, count * HashedBlock));
+        var key = _key;
+        if (count == 1)
+        {
+            if (!DecryptHashedBlock(key, first, cipher.AsSpan(0, HashedBlock), plain.AsSpan(0, HashedData)))
+                throw HashCheckFailed(first, cluster);
+            return;
+        }
+        var failed = long.MaxValue;
+        Parallel.For(0, count, i =>
+        {
+            if (!DecryptHashedBlock(key, first + i, cipher.AsSpan(i * HashedBlock, HashedBlock), plain.AsSpan(i * HashedData, HashedData)))
+                InterlockedMin(ref failed, first + i);
+        });
+        if (failed != long.MaxValue) throw HashCheckFailed(failed, cluster); // the first bad block, as a serial read would report
     }
+
+    private static bool DecryptHashedBlock(byte[] key, long index, ReadOnlySpan<byte> block, Span<byte> plain)
+    {
+        Span<byte> hashes = stackalloc byte[HashArea];
+        WiiUCrypto.DecryptCbc(key, stackalloc byte[16], block[..HashArea], hashes);
+        var h0 = hashes.Slice((int)(index % 16) * 20, 20);
+        WiiUCrypto.DecryptCbc(key, h0[..16], block[HashArea..], plain);
+        Span<byte> sha1 = stackalloc byte[20];
+        SHA1.HashData(plain, sha1);
+        return sha1.SequenceEqual(h0);
+    }
+
+    private static void InterlockedMin(ref long target, long value)
+    {
+        var current = Volatile.Read(ref target);
+        while (value < current)
+        {
+            var seen = Interlocked.CompareExchange(ref target, value, current);
+            if (seen == current) return;
+            current = seen;
+        }
+    }
+
+    private static InvalidDataException HashCheckFailed(long index, int cluster) =>
+        new($"Block {index} of cluster {cluster} fails its hash check: the dump is damaged or the wrong key was used.");
 
     /// <summary>
     /// Checks raw clusters against the content hashes in a TMD (hashed
@@ -232,13 +284,14 @@ public sealed class FstVolume : IDisposable
             if (_clusters[c].HashMode == 2) continue;
             var content = contents[c];
             using IncrementalHash hash = IncrementalHash.CreateHash(content.IsSha1 ? HashAlgorithmName.SHA1 : HashAlgorithmName.SHA256);
-            var buffer = new byte[RawSector];
-            var plain = new byte[RawSector];
-            for (long done = 0, index = 0; done < content.Size; index++)
+            var cipher = _cipher ??= new byte[16 + RawRun * RawSector];
+            var plain = _plain ??= new byte[RawRun * RawSector];
+            for (long done = 0, index = 0; done < content.Size; index += RawRun)
             {
                 token.ThrowIfCancellationRequested();
-                DecryptRaw(c, index, buffer, plain);
-                var take = (int)Math.Min(RawSector, content.Size - done);
+                var count = (int)Math.Min(RawRun, (content.Size - done + RawSector - 1) / RawSector);
+                DecryptRaw(c, index, count, cipher, plain);
+                var take = (int)Math.Min(count * RawSector, content.Size - done);
                 hash.AppendData(plain, 0, take);
                 done += take;
                 progress?.Invoke(take);

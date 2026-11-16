@@ -9,9 +9,9 @@ public sealed class ZArchiveTests : IDisposable
     public void Dispose() => _scratch.Dispose();
 
     /// <summary>A small archive: raw and compressed blocks, an empty file, an empty folder, more than 16 blocks.</summary>
-    private (string Archive, Dictionary<string, byte[]> Files) Write()
+    private (string Archive, Dictionary<string, byte[]> Files) Write(int threads = 4, string name = "t.zar")
     {
-        var archive = Path.Combine(_scratch.Root, "t.zar");
+        var archive = Path.Combine(_scratch.Root, name);
         var rng = new Random(7);
         var files = new Dictionary<string, byte[]>
         {
@@ -22,7 +22,7 @@ public sealed class ZArchiveTests : IDisposable
             ["big/many.bin"] = WiiUSample.Text(17 * 65536 + 123),       // more than 16 blocks: two offset records
         };
         for (var i = 0; i < 40; i++) files[$"many/f{i:00}.bin"] = WiiUSample.Random(rng, rng.Next(0, 5000));
-        using var w = new ZArchiveWriter(archive);
+        using var w = new ZArchiveWriter(archive) { CompressionThreads = threads };
         foreach (var (path, data) in files)
         {
             var slash = path.LastIndexOf('/');
@@ -56,6 +56,133 @@ public sealed class ZArchiveTests : IDisposable
         Assert.False(empty.IsFile);
         Assert.Empty(r.Children(empty));
         Assert.Equal(files.Count, r.Walk().Count(e => e.IsFile));
+    }
+
+    [Fact]
+    public void Compressing_on_several_threads_writes_the_same_bytes()
+    {
+        var (serial, _) = Write(1, "serial.zar");
+        var (parallel, _) = Write(8, "parallel.zar");
+        Assert.Equal(File.ReadAllBytes(serial), File.ReadAllBytes(parallel));
+    }
+
+    [Fact]
+    public void A_writer_abandoned_mid_way_disposes_cleanly()
+    {
+        var ms = new MemoryStream();
+        using (var w = new ZArchiveWriter(ms) { CompressionThreads = 4 })
+            w.AddFile("big.bin", new MemoryStream(WiiUSample.Text(40 * 65536)));
+        Assert.True(ms.Length > 0); // blocks were written in order before the writer gave up; no footer
+    }
+
+    [Fact]
+    public void HashFiles_hashes_every_file_in_one_pass()
+    {
+        var (archive, files) = Write();
+        using var r = ZArchiveReader.Open(archive);
+        long read = 0;
+        var found = r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA1, n => read += n);
+        Assert.True(found.IntegrityOk);
+        Assert.Equal(r.Length, read);
+        Assert.Equal(files.Count, found.Files.Count);
+        foreach (var (path, data) in files)
+            Assert.Equal(System.Security.Cryptography.SHA1.HashData(data), found.Files[path.Replace("B/", "b/")]);
+
+        var bytes = File.ReadAllBytes(archive);
+        bytes[1000] ^= 0x40; // inside b/Zeta.bin's first block, stored raw
+        var bad = Path.Combine(_scratch.Root, "bad.zar");
+        File.WriteAllBytes(bad, bytes);
+        using var rb = ZArchiveReader.Open(bad);
+        var damaged = rb.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        Assert.False(damaged.IntegrityOk);
+        Assert.NotEqual(System.Security.Cryptography.SHA256.HashData(files["b/Zeta.bin"]), damaged.Files["b/Zeta.bin"]);
+    }
+
+    /// <summary>About 11 MiB: several 64-block hash batches, files crossing batch edges, raw and compressed blocks.</summary>
+    private (string Archive, Dictionary<string, byte[]> Files) WriteLarge(int threads, string name)
+    {
+        var archive = Path.Combine(_scratch.Root, name);
+        var rng = new Random(11);
+        var files = new Dictionary<string, byte[]>
+        {
+            ["a/first.bin"] = WiiUSample.Random(rng, 64 * 65536 - 5),       // ends 5 bytes short of the first batch
+            ["a/edge.txt"] = WiiUSample.Text(70_000),                       // crosses into the second batch
+            ["a/long.bin"] = WiiUSample.Random(rng, 3 * 64 * 65536 / 2),    // spans a whole batch
+            ["a/zero"] = [],
+        };
+        for (var i = 0; i < 300; i++) files[$"s/f{i:000}"] = rng.Next(3) == 0 ? WiiUSample.Random(rng, rng.Next(0, 9000)) : WiiUSample.Text(rng.Next(0, 9000));
+        files["z/tail.txt"] = WiiUSample.Text(2 * 64 * 65536 + 777);
+        using var w = new ZArchiveWriter(archive) { CompressionThreads = threads };
+        foreach (var (path, data) in files)
+        {
+            var slash = path.LastIndexOf('/');
+            if (slash > 0) w.AddDirectory(path[..slash]);
+            w.AddFile(path, new MemoryStream(data));
+        }
+        w.Finish();
+        return (archive, files);
+    }
+
+    [Fact]
+    public void Large_archives_are_the_same_on_any_thread_count_and_hash_in_several_batches()
+    {
+        var (serial, files) = WriteLarge(1, "large1.zar");
+        var (parallel, _) = WriteLarge(3, "large3.zar");
+        var bytes = File.ReadAllBytes(serial);
+        Assert.Equal(bytes, File.ReadAllBytes(parallel));
+        // The archive the code before parallel compression (0c39e2a) wrote from the same input.
+        Assert.Equal("29D08186A81DB1DE9D70FF11EBD22345DBD6FD8BE718D8B79B578F74206E662E", Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)));
+
+        using var r = ZArchiveReader.Open(parallel);
+        long read = 0;
+        var found = r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256, n => read += n);
+        Assert.True(found.IntegrityOk);
+        Assert.Equal(r.Length, read);
+        Assert.Equal(files.Count, found.Files.Count);
+        foreach (var (path, data) in files)
+            Assert.True(System.Security.Cryptography.SHA256.HashData(data).AsSpan().SequenceEqual(found.Files[path]), path);
+
+        // Damage in a later batch: the integrity check fails and only the file holding that byte hashes differently.
+        var bad = Path.Combine(_scratch.Root, "large-bad.zar");
+        var damaged = (byte[])bytes.Clone();
+        damaged[bytes.Length / 2] ^= 0x01;
+        File.WriteAllBytes(bad, damaged);
+        using var rb = ZArchiveReader.Open(bad);
+        try
+        {
+            var f = rb.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            Assert.False(f.IntegrityOk);
+        }
+        catch (ZArchiveException) { } // a damaged compressed block may not decompress at all
+    }
+
+    [Fact]
+    public void HashFiles_cancels()
+    {
+        var (archive, _) = WriteLarge(4, "large-cancel.zar");
+        using var r = ZArchiveReader.Open(archive);
+        using var cts = new CancellationTokenSource();
+        Assert.ThrowsAny<OperationCanceledException>(() => r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256, n => cts.Cancel(), cts.Token));
+        // The reader is still usable afterwards.
+        Assert.True(r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256).IntegrityOk);
+    }
+
+    [Fact]
+    public void HashFiles_handles_archives_of_empty_files()
+    {
+        var path = Path.Combine(_scratch.Root, "empty.zar");
+        using (var w = new ZArchiveWriter(path))
+        {
+            w.AddFile("a", Stream.Null);
+            w.AddDirectory("d");
+            w.AddFile("d/b", Stream.Null);
+            w.Finish();
+        }
+        using var r = ZArchiveReader.Open(path);
+        var found = r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        Assert.True(found.IntegrityOk);
+        Assert.Equal(System.Security.Cryptography.SHA256.HashData([]), found.Files["d/b"]);
+        Assert.Equal(2, found.Files.Count);
     }
 
     [Fact]

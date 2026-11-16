@@ -143,14 +143,16 @@ public static class WuaBuilder
     /// Reopens a written archive and checks it the way a reader would: the
     /// footer's SHA-256 over the whole file, then every file decompressed and
     /// compared, by SHA-256, with <paramref name="expected"/> (archive path to
-    /// SHA-256 of what went in).
+    /// SHA-256 of what went in). Both come from one pass over the file (see
+    /// <see cref="ZArchiveReader.HashFiles"/>).
     /// </summary>
     public static void Verify(string archive, IReadOnlyDictionary<string, byte[]> expected, Action<double>? progress = null, CancellationToken token = default)
     {
         using var reader = ZArchiveReader.Open(archive);
         long done = 0;
-        var total = Math.Max(1, reader.Length * 2);
-        if (!reader.CheckIntegrity(n => { done += n; progress?.Invoke((double)done / total); }, token))
+        var total = Math.Max(1, reader.Length);
+        var found = reader.HashFiles(HashAlgorithmName.SHA256, n => { done += n; progress?.Invoke(Math.Min(1, (double)done / total)); }, token);
+        if (!found.IntegrityOk)
             throw new ZArchiveException("The new archive's SHA-256 doesn't match its contents.");
 
         var seen = 0;
@@ -158,10 +160,7 @@ public static class WuaBuilder
         {
             if (!expected.TryGetValue(entry.Path, out var want))
                 throw new ZArchiveException($"The new archive has an unexpected file: {entry.Path}");
-            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            using var sink = new HashOnlyStream(sha);
-            reader.CopyFile(entry, sink, n => { done += n; progress?.Invoke(Math.Min(1, (double)done / total)); }, token);
-            if (!sha.GetHashAndReset().AsSpan().SequenceEqual(want))
+            if (!found.Files[entry.Path].AsSpan().SequenceEqual(want))
                 throw new ZArchiveException($"{entry.Path} reads back differently from its source.");
             seen++;
         }
@@ -309,21 +308,6 @@ public static class WuaBuilder
         public override long Length => throw new NotSupportedException();
         public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
         public override void Flush() => inner.Flush();
-        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
-    }
-
-    /// <summary>A write-only stream that only hashes.</summary>
-    private sealed class HashOnlyStream(IncrementalHash sha) : Stream
-    {
-        public override void Write(byte[] buffer, int offset, int count) => sha.AppendData(buffer, offset, count);
-        public override bool CanRead => false;
-        public override bool CanSeek => false;
-        public override bool CanWrite => true;
-        public override long Length => throw new NotSupportedException();
-        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-        public override void Flush() { }
         public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();

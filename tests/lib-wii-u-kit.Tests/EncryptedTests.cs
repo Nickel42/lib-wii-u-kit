@@ -194,6 +194,28 @@ public sealed class EncryptedTests(Samples s) : IDisposable
     }
 
     [Fact]
+    public void Files_longer_than_one_decrypt_run_read_back_from_nus_wud_and_wux()
+    {
+        // Raw and hashed files over 1 MiB (several decrypt runs each), and zeros that a WUX stores once.
+        var tree = WiiUSample.MakeTitle(Path.Combine(_scratch.Root, "big-tree"), Samples.EncBase, 0, "Encrypted Game", 23);
+        var rng = new Random(23);
+        File.WriteAllBytes(Path.Combine(tree, "code", "big.rpx"), WiiUSample.Random(rng, 3 * 1024 * 1024 / 2 + 77));
+        File.WriteAllBytes(Path.Combine(tree, "content", "Common", "big.bin"), WiiUSample.Random(rng, 5 * 1024 * 1024 / 2 + 1234));
+        File.WriteAllBytes(Path.Combine(tree, "content", "zeros.bin"), new byte[3 * 0x10000 * 16]);
+        File.WriteAllBytes(Path.Combine(tree, "content", "tail.bin"), WiiUSample.Random(rng, 70_000));
+
+        BuildAndCheck([EncryptedSample.MakeNus(tree, Path.Combine(_scratch.Root, "big-nus"), Samples.EncBase, 0, s.EncKeys)], null, (GameFolder, tree));
+        var wud = EncryptedSample.MakeWud(tree, Samples.EncBase, s.EncKeys);
+        var wudPath = Path.Combine(_scratch.Root, "big.wud");
+        File.WriteAllBytes(wudPath, wud);
+        BuildAndCheck([wudPath], null, (GameFolder, tree));
+        var wux = Path.Combine(_scratch.Root, "big.wux");
+        File.WriteAllBytes(wux, EncryptedSample.ToWux(wud));
+        Assert.True(new FileInfo(wux).Length < wud.Length - 0x10000 * 16); // the zeros were stored once
+        BuildAndCheck([wux], null, (GameFolder, tree));
+    }
+
+    [Fact]
     public void Wud_split_into_parts()
     {
         var dir = _scratch.Dir("split");
@@ -267,6 +289,24 @@ public sealed class EncryptedTests(Samples s) : IDisposable
         var dir = _scratch.Dir("damaged-out");
         var ex = Assert.Throws<InvalidDataException>(() => WuaBuilder.Build([bad], Samples.EncBase, dir, new WuaBuildOptions { Keys = s.Keys }));
         Assert.Contains("hash", ex.Message);
+        Assert.Empty(Directory.GetFiles(dir));
+    }
+
+    [Fact]
+    public void Damaged_blocks_checked_together_report_the_first()
+    {
+        // content/Common/Level01.pack spans hashed blocks 0-3, which are decrypted and checked as one run.
+        var bad = Path.Combine(_scratch.Root, "nus-damaged-run");
+        WiiUSample.CopyTree(s.NusGame, bad);
+        var app = Path.Combine(bad, "00000002.app");
+        var bytes = File.ReadAllBytes(app);
+        bytes[3 * 0x10000 + 0x400 + 100] ^= 0x01;
+        bytes[2 * 0x10000 + 0x400 + 100] ^= 0x01;
+        File.WriteAllBytes(app, bytes);
+
+        var dir = _scratch.Dir("damaged-run-out");
+        var ex = Assert.Throws<InvalidDataException>(() => WuaBuilder.Build([bad], Samples.EncBase, dir, new WuaBuildOptions { Keys = s.Keys }));
+        Assert.StartsWith("Block 2 of cluster 2 ", ex.Message);
         Assert.Empty(Directory.GetFiles(dir));
     }
 
