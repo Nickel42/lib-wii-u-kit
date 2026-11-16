@@ -9,9 +9,9 @@ public sealed class ZArchiveTests : IDisposable
     public void Dispose() => _scratch.Dispose();
 
     /// <summary>A small archive: raw and compressed blocks, an empty file, an empty folder, more than 16 blocks.</summary>
-    private (string Archive, Dictionary<string, byte[]> Files) Write()
+    private (string Archive, Dictionary<string, byte[]> Files) Write(int threads = 4, string name = "t.zar")
     {
-        var archive = Path.Combine(_scratch.Root, "t.zar");
+        var archive = Path.Combine(_scratch.Root, name);
         var rng = new Random(7);
         var files = new Dictionary<string, byte[]>
         {
@@ -22,7 +22,7 @@ public sealed class ZArchiveTests : IDisposable
             ["big/many.bin"] = WiiUSample.Text(17 * 65536 + 123),       // more than 16 blocks: two offset records
         };
         for (var i = 0; i < 40; i++) files[$"many/f{i:00}.bin"] = WiiUSample.Random(rng, rng.Next(0, 5000));
-        using var w = new ZArchiveWriter(archive);
+        using var w = new ZArchiveWriter(archive) { CompressionThreads = threads };
         foreach (var (path, data) in files)
         {
             var slash = path.LastIndexOf('/');
@@ -56,6 +56,23 @@ public sealed class ZArchiveTests : IDisposable
         Assert.False(empty.IsFile);
         Assert.Empty(r.Children(empty));
         Assert.Equal(files.Count, r.Walk().Count(e => e.IsFile));
+    }
+
+    [Fact]
+    public void Compressing_on_several_threads_writes_the_same_bytes()
+    {
+        var (serial, _) = Write(1, "serial.zar");
+        var (parallel, _) = Write(8, "parallel.zar");
+        Assert.Equal(File.ReadAllBytes(serial), File.ReadAllBytes(parallel));
+    }
+
+    [Fact]
+    public void A_writer_abandoned_mid_way_disposes_cleanly()
+    {
+        var ms = new MemoryStream();
+        using (var w = new ZArchiveWriter(ms) { CompressionThreads = 4 })
+            w.AddFile("big.bin", new MemoryStream(WiiUSample.Text(40 * 65536)));
+        Assert.True(ms.Length > 0); // blocks were written in order before the writer gave up; no footer
     }
 
     [Fact]

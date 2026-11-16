@@ -98,8 +98,10 @@ public sealed class ZArchiveWriter : IDisposable
     private readonly IncrementalHash _sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private readonly Compressor _zstd = new(ZArchiveFormat.ZstdLevel);
     private readonly Node _root = new(false, []);
-    private readonly byte[] _block = new byte[ZArchiveFormat.BlockSize];
+    private byte[] _block = new byte[ZArchiveFormat.BlockSize];
     private readonly byte[] _compressed;
+    private BlockCompressor? _parallel;
+    private readonly int _compressionThreads = Environment.ProcessorCount;
     private readonly List<(ulong BaseOffset, ushort[] Sizes)> _records = [];
     private int _blockFill;
     private long _blocksWritten;
@@ -114,6 +116,18 @@ public sealed class ZArchiveWriter : IDisposable
         _output = output;
         _ownsOutput = ownsOutput;
         _compressed = new byte[Compressor.GetCompressBound(ZArchiveFormat.BlockSize)];
+    }
+
+    /// <summary>
+    /// How many threads compress blocks (default: one per processor). Blocks
+    /// are compressed independently and written in order, so the archive is
+    /// byte for byte the same whatever this is; 1 compresses on the calling
+    /// thread. Set it when creating the writer.
+    /// </summary>
+    public int CompressionThreads
+    {
+        get => _compressionThreads;
+        init => _compressionThreads = Math.Clamp(value, 1, 256);
     }
 
     /// <summary>Bytes of file data added so far (uncompressed).</summary>
@@ -229,9 +243,10 @@ public sealed class ZArchiveWriter : IDisposable
             Array.Clear(_block, _blockFill, _block.Length - _blockFill);
             _inputOffset += (ulong)(_block.Length - _blockFill);
             _blockFill = _block.Length;
-            StoreBlock(_block);
+            SubmitBlock();
             _blockFill = 0;
         }
+        _parallel?.Drain(StoreBlock);
         var compressedSize = _outputOffset;
         while (_outputOffset % 8 != 0) Write([0]);
 
@@ -326,16 +341,28 @@ public sealed class ZArchiveWriter : IDisposable
             data = data[take..];
             if (_blockFill == _block.Length)
             {
-                StoreBlock(_block);
+                SubmitBlock();
                 _blockFill = 0;
             }
         }
     }
 
-    private void StoreBlock(byte[] block)
+    /// <summary>Hands the full <see cref="_block"/> on for compression; with more than one thread it is swapped for an empty one.</summary>
+    private void SubmitBlock()
+    {
+        if (_compressionThreads <= 1)
+        {
+            StoreBlock(_block, _compressed, _zstd.Wrap(_block, _compressed));
+            return;
+        }
+        _parallel ??= new BlockCompressor(_compressionThreads);
+        _block = _parallel.Submit(_block, StoreBlock);
+    }
+
+    /// <summary>Writes one block, in order: compressed, or raw when compressing didn't shrink it.</summary>
+    private void StoreBlock(byte[] block, byte[] compressed, int size)
     {
         var at = _outputOffset;
-        var size = _zstd.Wrap(block, _compressed);
         if (size >= ZArchiveFormat.BlockSize)
         {
             size = ZArchiveFormat.BlockSize;
@@ -343,7 +370,7 @@ public sealed class ZArchiveWriter : IDisposable
         }
         else
         {
-            Write(_compressed.AsSpan(0, size));
+            Write(compressed.AsSpan(0, size));
         }
         if (_blocksWritten % ZArchiveFormat.EntriesPerOffsetRecord == 0)
             _records.Add((at, new ushort[ZArchiveFormat.EntriesPerOffsetRecord]));
@@ -384,6 +411,7 @@ public sealed class ZArchiveWriter : IDisposable
 
     public void Dispose()
     {
+        _parallel?.Dispose();
         _zstd.Dispose();
         _sha.Dispose();
         if (_ownsOutput) _output.Dispose();
