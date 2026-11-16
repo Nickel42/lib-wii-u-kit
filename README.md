@@ -76,6 +76,12 @@ using var output = File.Create("meta.xml");
 reader.CopyFile(meta, output);
 ```
 
+To check a whole archive, `reader.HashFiles(HashAlgorithmName.SHA256)` reads it
+once, front to back: it checks the footer's SHA-256 and hashes every file
+(any algorithm), decompressing on several threads. `ZArchiveWriter` compresses
+on one thread per processor by default (`CompressionThreads`); the archive's
+bytes are the same however many threads write it.
+
 Errors: `WiiUKeysMissingException` when an encrypted source is opened with no
 keys at all (a `KeyNotFoundException`, which is also thrown when none of the
 keys fits), `InvalidDataException` for damaged or unrecognised input,

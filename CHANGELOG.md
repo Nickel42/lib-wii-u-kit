@@ -1,7 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.0.0-rc.2 (2026-11-16)
 
+- **Faster packing:** `ZArchiveWriter` compresses blocks on several threads
+  (`CompressionThreads`, default one per processor) and writes them in order,
+  so the archive is byte for byte the same as before. This also speeds up
+  any other ZArchive (.zar) written with it.
+- **Faster verifying:** new `ZArchiveReader.HashFiles(algorithm)` checks the
+  footer's SHA-256 and hashes every file in one front-to-back read,
+  decompressing on several threads. `WuaBuilder.Verify` uses it, so a new
+  .wua is read once instead of twice. `ZArchiveReader` also keeps the last
+  block it decompressed, so files sharing a block don't decompress it again.
+- **Faster decrypting:** NUS titles and disc images are decrypted in runs of
+  up to 1 MiB, hashed blocks checked on several threads, without setting the
+  AES key again for every sector; consecutive WUX sectors are read in one go.
+- **Less garbage:** no 1 MiB buffer per file added to an archive; folder
+  entries are looked up by name instead of one by one.
 - **Dependency:** ZstdSharp.Port 0.8.6 → 0.8.8 (bug fixes).
 - **Title key lists in keys.txt:** a line holding a 16-digit title ID and that
   title's 32-digit key is now read, not reported. Those keys are kept by title
