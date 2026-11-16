@@ -419,7 +419,7 @@ public sealed class ZArchiveWriter : IDisposable
 }
 
 /// <summary>Reads a ZArchive: the file tree, file contents, and the integrity hash.</summary>
-public sealed class ZArchiveReader : IDisposable
+public sealed partial class ZArchiveReader : IDisposable
 {
     public sealed record Entry(string Path, string Name, bool IsFile, ulong Offset, ulong Size, uint FirstChild, uint ChildCount, int Index);
 
@@ -552,7 +552,6 @@ public sealed class ZArchiveReader : IDisposable
     public void CopyFile(Entry file, Stream destination, Action<long>? bytesCopied = null, CancellationToken token = default)
     {
         if (!file.IsFile) throw new ArgumentException("Not a file.", nameof(file));
-        var block = new byte[ZArchiveFormat.BlockSize];
         var remaining = file.Size;
         var position = file.Offset;
         while (remaining > 0)
@@ -560,7 +559,7 @@ public sealed class ZArchiveReader : IDisposable
             token.ThrowIfCancellationRequested();
             var blockIndex = position / ZArchiveFormat.BlockSize;
             var within = (int)(position % ZArchiveFormat.BlockSize);
-            ReadBlock(blockIndex, block);
+            var block = ReadBlock(blockIndex);
             var take = (int)Math.Min((ulong)(ZArchiveFormat.BlockSize - within), remaining);
             destination.Write(block, within, take);
             bytesCopied?.Invoke(take);
@@ -569,7 +568,23 @@ public sealed class ZArchiveReader : IDisposable
         }
     }
 
-    private byte[] _compressedBlock = new byte[ZArchiveFormat.BlockSize];
+    private readonly byte[] _compressedBlock = new byte[ZArchiveFormat.BlockSize];
+    private readonly byte[] _plainBlock = new byte[ZArchiveFormat.BlockSize];
+    private ulong _plainBlockIndex = ulong.MaxValue;
+
+    /// <summary>
+    /// Block <paramref name="index"/>, decompressed. The last one read is kept:
+    /// small files share blocks, and each file of a block would otherwise
+    /// read and decompress it again.
+    /// </summary>
+    private byte[] ReadBlock(ulong index)
+    {
+        if (index == _plainBlockIndex) return _plainBlock;
+        _plainBlockIndex = ulong.MaxValue; // until it is whole
+        ReadBlock(index, _plainBlock);
+        _plainBlockIndex = index;
+        return _plainBlock;
+    }
 
     private void ReadBlock(ulong index, byte[] output)
     {
