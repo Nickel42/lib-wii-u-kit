@@ -88,6 +88,13 @@ public sealed class ZArchiveWriter : IDisposable
         public bool IsFile { get; } = isFile;
         public byte[] Name { get; } = name;
         public List<Node> Children { get; } = [];
+        public Dictionary<string, Node> ByName { get; } = new(StringComparer.Ordinal); // children by folded name
+
+        public void Add(Node child)
+        {
+            Children.Add(child);
+            ByName.Add(FoldedKey(child.Name), child);
+        }
         public ulong FileOffset { get; set; }
         public ulong FileSize { get; set; }
         public uint FirstChildIndex { get; set; }
@@ -102,6 +109,7 @@ public sealed class ZArchiveWriter : IDisposable
     private readonly byte[] _compressed;
     private BlockCompressor? _parallel;
     private readonly int _compressionThreads = Environment.ProcessorCount;
+    private byte[]? _readBuffer;
     private readonly List<(ulong BaseOffset, ushort[] Sizes)> _records = [];
     private int _blockFill;
     private long _blocksWritten;
@@ -144,7 +152,7 @@ public sealed class ZArchiveWriter : IDisposable
             if (next is null)
             {
                 next = new Node(false, name);
-                node.Children.Add(next);
+                node.Add(next);
             }
             else if (next.IsFile)
             {
@@ -156,6 +164,23 @@ public sealed class ZArchiveWriter : IDisposable
 
     /// <summary>Adds a file whose folder must already exist, copying <paramref name="data"/> to its end.</summary>
     public void AddFile(string path, Stream data, Action<long>? bytesCopied = null, CancellationToken token = default)
+    {
+        var file = CreateFile(path);
+        var buffer = _readBuffer ??= new byte[1 << 20];
+        int n;
+        while ((n = data.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            token.ThrowIfCancellationRequested();
+            Append(buffer.AsSpan(0, n));
+            file.FileSize += (ulong)n;
+            bytesCopied?.Invoke(n);
+        }
+        if (file.FileSize > ZArchiveFormat.MaxFileSize)
+            throw new ZArchiveException($"'{path}' is larger than ZArchive's 256 TB limit.");
+    }
+
+    /// <summary>Adds an empty file entry at the current offset; its folder must already exist.</summary>
+    private Node CreateFile(string path)
     {
         var parts = ZArchiveFormat.SplitPath(path).ToList();
         if (parts.Count == 0) throw new ZArchiveException("A file needs a name.");
@@ -171,19 +196,8 @@ public sealed class ZArchiveWriter : IDisposable
             throw new ZArchiveException($"'{path}' is already in the archive (names are case-insensitive).");
 
         var file = new Node(true, name) { FileOffset = _inputOffset };
-        dir.Children.Add(file);
-
-        var buffer = new byte[1 << 20];
-        int n;
-        while ((n = data.Read(buffer, 0, buffer.Length)) > 0)
-        {
-            token.ThrowIfCancellationRequested();
-            Append(buffer.AsSpan(0, n));
-            file.FileSize += (ulong)n;
-            bytesCopied?.Invoke(n);
-        }
-        if (file.FileSize > ZArchiveFormat.MaxFileSize)
-            throw new ZArchiveException($"'{path}' is larger than ZArchive's 256 TB limit.");
+        dir.Add(file);
+        return file;
     }
 
     /// <summary>
@@ -193,23 +207,13 @@ public sealed class ZArchiveWriter : IDisposable
     public void AddFile(string path, Action<Stream> fill)
     {
         using var sink = new SinkStream();
-        AddFile(path, Stream.Null); // creates the entry at the current offset, empty
-        var file = LastAdded(path);
+        var file = CreateFile(path);
         sink.Target = data =>
         {
             Append(data);
             file.FileSize += (ulong)data.Length;
         };
         fill(sink);
-    }
-
-    private Node LastAdded(string path)
-    {
-        var parts = ZArchiveFormat.SplitPath(path).ToList();
-        var node = _root;
-        foreach (var part in parts)
-            node = Find(node, EncodeName(part, path))!;
-        return node;
     }
 
     /// <summary>A write-only stream that hands each write to a callback.</summary>
@@ -397,8 +401,15 @@ public sealed class ZArchiveWriter : IDisposable
         }
     }
 
-    private static Node? Find(Node dir, byte[] name) =>
-        dir.Children.FirstOrDefault(c => ZArchiveFormat.NamesEqual(c.Name, name));
+    private static Node? Find(Node dir, byte[] name) => dir.ByName.GetValueOrDefault(FoldedKey(name));
+
+    /// <summary>A name as a lookup key that matches the archive's case-insensitivity (ASCII A–Z folded, nothing else).</summary>
+    private static string FoldedKey(byte[] name) =>
+        string.Create(name.Length, name, static (chars, bytes) =>
+        {
+            for (var i = 0; i < bytes.Length; i++)
+                chars[i] = (char)(bytes[i] is >= (byte)'A' and <= (byte)'Z' ? bytes[i] + 32 : bytes[i]);
+        });
 
     private static byte[] EncodeName(string part, string fullPath)
     {
