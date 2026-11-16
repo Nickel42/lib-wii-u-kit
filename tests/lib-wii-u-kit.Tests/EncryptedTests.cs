@@ -194,6 +194,28 @@ public sealed class EncryptedTests(Samples s) : IDisposable
     }
 
     [Fact]
+    public void Files_longer_than_one_decrypt_run_read_back_from_nus_wud_and_wux()
+    {
+        // Raw and hashed files over 1 MiB (several decrypt runs each), and zeros that a WUX stores once.
+        var tree = WiiUSample.MakeTitle(Path.Combine(_scratch.Root, "big-tree"), Samples.EncBase, 0, "Encrypted Game", 23);
+        var rng = new Random(23);
+        File.WriteAllBytes(Path.Combine(tree, "code", "big.rpx"), WiiUSample.Random(rng, 3 * 1024 * 1024 / 2 + 77));
+        File.WriteAllBytes(Path.Combine(tree, "content", "Common", "big.bin"), WiiUSample.Random(rng, 5 * 1024 * 1024 / 2 + 1234));
+        File.WriteAllBytes(Path.Combine(tree, "content", "zeros.bin"), new byte[3 * 0x10000 * 16]);
+        File.WriteAllBytes(Path.Combine(tree, "content", "tail.bin"), WiiUSample.Random(rng, 70_000));
+
+        BuildAndCheck([EncryptedSample.MakeNus(tree, Path.Combine(_scratch.Root, "big-nus"), Samples.EncBase, 0, s.EncKeys)], null, (GameFolder, tree));
+        var wud = EncryptedSample.MakeWud(tree, Samples.EncBase, s.EncKeys);
+        var wudPath = Path.Combine(_scratch.Root, "big.wud");
+        File.WriteAllBytes(wudPath, wud);
+        BuildAndCheck([wudPath], null, (GameFolder, tree));
+        var wux = Path.Combine(_scratch.Root, "big.wux");
+        File.WriteAllBytes(wux, EncryptedSample.ToWux(wud));
+        Assert.True(new FileInfo(wux).Length < wud.Length - 0x10000 * 16); // the zeros were stored once
+        BuildAndCheck([wux], null, (GameFolder, tree));
+    }
+
+    [Fact]
     public void Wud_split_into_parts()
     {
         var dir = _scratch.Dir("split");
