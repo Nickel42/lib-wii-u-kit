@@ -131,11 +131,17 @@ public sealed class WiiUKeysMissingException(string message) : KeyNotFoundExcept
 internal static class WiiUCrypto
 {
     [ThreadStatic] private static Aes? _aes;
+    [ThreadStatic] private static byte[]? _aesKey;
 
     public static void DecryptCbc(ReadOnlySpan<byte> key, ReadOnlySpan<byte> iv, ReadOnlySpan<byte> input, Span<byte> output)
     {
         var aes = _aes ??= Aes.Create();
-        aes.Key = key.ToArray();
+        // Setting the key rebuilds the cipher; a volume decrypts thousands of times with the same one.
+        if (_aesKey is null || !key.SequenceEqual(_aesKey))
+        {
+            _aesKey = key.ToArray();
+            aes.Key = _aesKey;
+        }
         aes.DecryptCbc(input, iv, output, PaddingMode.None);
     }
 

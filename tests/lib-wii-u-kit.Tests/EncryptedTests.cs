@@ -271,6 +271,24 @@ public sealed class EncryptedTests(Samples s) : IDisposable
     }
 
     [Fact]
+    public void Damaged_blocks_checked_together_report_the_first()
+    {
+        // content/Common/Level01.pack spans hashed blocks 0-3, which are decrypted and checked as one run.
+        var bad = Path.Combine(_scratch.Root, "nus-damaged-run");
+        WiiUSample.CopyTree(s.NusGame, bad);
+        var app = Path.Combine(bad, "00000002.app");
+        var bytes = File.ReadAllBytes(app);
+        bytes[3 * 0x10000 + 0x400 + 100] ^= 0x01;
+        bytes[2 * 0x10000 + 0x400 + 100] ^= 0x01;
+        File.WriteAllBytes(app, bytes);
+
+        var dir = _scratch.Dir("damaged-run-out");
+        var ex = Assert.Throws<InvalidDataException>(() => WuaBuilder.Build([bad], Samples.EncBase, dir, new WuaBuildOptions { Keys = s.Keys }));
+        Assert.StartsWith("Block 2 of cluster 2 ", ex.Message);
+        Assert.Empty(Directory.GetFiles(dir));
+    }
+
+    [Fact]
     public void Damaged_raw_content_fails_the_tmd_check()
     {
         var bad = Path.Combine(_scratch.Root, "nus-raw-damaged");
