@@ -5,7 +5,7 @@ using ZstdSharp;
 
 namespace LibWiiUKit;
 
-/// <summary>What <see cref="ZArchiveReader.HashFiles"/> found.</summary>
+/// <summary>What <see cref="ZArchiveReader.HashFiles(HashAlgorithmName, Action{long}?, CancellationToken)"/> found.</summary>
 /// <param name="IntegrityOk">Whether the footer's SHA-256 matches the whole file.</param>
 /// <param name="Files">Each file's path and the hash of its contents.</param>
 public sealed record ZArchiveHashes(bool IntegrityOk, IReadOnlyDictionary<string, byte[]> Files);
@@ -33,8 +33,19 @@ public sealed partial class ZArchiveReader
     /// however many files share it. <paramref name="bytesRead"/> is called
     /// with the bytes of the archive read, which add up to <see cref="Length"/>.
     /// </summary>
-    public ZArchiveHashes HashFiles(HashAlgorithmName algorithm, Action<long>? bytesRead = null, CancellationToken token = default)
+    public ZArchiveHashes HashFiles(HashAlgorithmName algorithm, Action<long>? bytesRead = null, CancellationToken token = default) =>
+        HashFiles(algorithm, 0, bytesRead, token);
+
+    /// <summary>
+    /// <see cref="HashFiles(HashAlgorithmName, Action{long}?, CancellationToken)"/>
+    /// with at most <paramref name="threads"/> blocks decompressed at once
+    /// (0: one per processor), however many batches overlap. One more thread
+    /// reads and one hashes in order, as with any count; the hashes are the
+    /// same whatever it is.
+    /// </summary>
+    public ZArchiveHashes HashFiles(HashAlgorithmName algorithm, int threads, Action<long>? bytesRead = null, CancellationToken token = default)
     {
+        if (threads <= 0) threads = Environment.ProcessorCount;
         var files = Walk().Where(e => e.IsFile).OrderBy(e => e.Offset).ThenBy(e => e.Size).ToList();
         var dataEnd = files.Count == 0 ? 0 : files.Max(f => f.Offset + f.Size);
         var blockCount = (dataEnd + ZArchiveFormat.BlockSize - 1) / ZArchiveFormat.BlockSize;
@@ -44,6 +55,8 @@ public sealed partial class ZArchiveReader
         using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var feeder = new FileFeeder(files, algorithm);
         var decompressors = new ConcurrentBag<Decompressor>();
+        using var slotsFree = new SemaphoreSlim(threads, threads); // shared by the two batches in flight
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = threads };
         HashBatch[] slots = [new(), new()];
         Task? previous = null;
         try
@@ -73,7 +86,7 @@ public sealed partial class ZArchiveReader
                 var before = previous;
                 batch.Task = previous = Task.Run(() =>
                 {
-                    Decompress(batch, decompressors);
+                    Decompress(batch, decompressors, parallel, slotsFree);
                     before?.GetAwaiter().GetResult(); // files are fed in order
                     for (var i = 0; i < batch.Count; i++)
                         feeder.Feed((batch.FirstBlock + (ulong)i) * ZArchiveFormat.BlockSize, batch.Plain.AsSpan(i * ZArchiveFormat.BlockSize, ZArchiveFormat.BlockSize));
@@ -139,23 +152,30 @@ public sealed partial class ZArchiveReader
         return blocks;
     }
 
-    private static void Decompress(HashBatch batch, ConcurrentBag<Decompressor> decompressors)
+    private static void Decompress(HashBatch batch, ConcurrentBag<Decompressor> decompressors, ParallelOptions parallel, SemaphoreSlim slotsFree)
     {
-        Parallel.For(0, batch.Count, () => decompressors.TryTake(out var d) ? d : new Decompressor(), (i, _, zstd) =>
+        Parallel.For(0, batch.Count, parallel, () => decompressors.TryTake(out var d) ? d : new Decompressor(), (i, _, zstd) =>
         {
-            var input = batch.Compressed.AsSpan(batch.Starts[i], batch.Sizes[i]);
-            var output = batch.Plain.AsSpan(i * ZArchiveFormat.BlockSize, ZArchiveFormat.BlockSize);
-            if (batch.Sizes[i] == ZArchiveFormat.BlockSize)
-            {
-                input.CopyTo(output);
-                return zstd;
-            }
-            int got;
-            try { got = zstd.Unwrap(input, output); }
-            catch (ZstdException ex) { throw new ZArchiveException($"A compressed block is damaged ({ex.Message})."); }
-            if (got != ZArchiveFormat.BlockSize) throw new ZArchiveException("A compressed block decompressed to the wrong size.");
+            slotsFree.Wait();
+            try { DecompressBlock(batch, i, zstd); }
+            finally { slotsFree.Release(); }
             return zstd;
         }, decompressors.Add);
+    }
+
+    private static void DecompressBlock(HashBatch batch, int i, Decompressor zstd)
+    {
+        var input = batch.Compressed.AsSpan(batch.Starts[i], batch.Sizes[i]);
+        var output = batch.Plain.AsSpan(i * ZArchiveFormat.BlockSize, ZArchiveFormat.BlockSize);
+        if (batch.Sizes[i] == ZArchiveFormat.BlockSize)
+        {
+            input.CopyTo(output);
+            return;
+        }
+        int got;
+        try { got = zstd.Unwrap(input, output); }
+        catch (ZstdException ex) { throw new ZArchiveException($"A compressed block is damaged ({ex.Message})."); }
+        if (got != ZArchiveFormat.BlockSize) throw new ZArchiveException("A compressed block decompressed to the wrong size.");
     }
 
     /// <summary>For archives whose blocks aren't in file order: the integrity check, then each file read on its own.</summary>

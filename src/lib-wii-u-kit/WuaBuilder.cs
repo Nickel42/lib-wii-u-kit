@@ -21,6 +21,15 @@ public sealed class WuaBuildOptions
     public Action<WuaLogLevel, string>? Log { get; init; }
 
     public CancellationToken CancellationToken { get; init; }
+
+    /// <summary>
+    /// How many threads the build may keep busy at once (default 0: one per
+    /// processor). Packing an NUS title or disc image gives about a quarter
+    /// of them to decrypting and the rest to compressing, as both run at
+    /// once; verifying decompresses on all of them. 1 does everything on the
+    /// calling thread. The .wua is the same whatever this is.
+    /// </summary>
+    public int Threads { get; init; }
 }
 
 /// <param name="Output">The .wua written.</param>
@@ -90,7 +99,7 @@ public static class WuaBuilder
     /// Writes <paramref name="titles"/> to <paramref name="output"/>, each in
     /// its own <see cref="WiiUTitle.ArchiveFolder"/>. The archive goes to a
     /// temporary file next to <paramref name="output"/>, is verified (see
-    /// <see cref="Verify"/>), and only then moved into place, replacing any
+    /// <see cref="Verify(string, IReadOnlyDictionary{string, byte[]}, int, Action{double}?, CancellationToken)"/>), and only then moved into place, replacing any
     /// file there (which may be one of the titles' own .wua). A failed or
     /// cancelled build leaves nothing behind.
     /// </summary>
@@ -111,7 +120,9 @@ public static class WuaBuilder
             var total = Math.Max(1, inputBytes);
             long done = 0;
             options.Stage?.Invoke("Packing");
-            using (var writer = new ZArchiveWriter(temp))
+            var threads = options.Threads > 0 ? options.Threads : Environment.ProcessorCount;
+            var (decryptThreads, compressThreads) = SplitThreads(threads, titles.Any(t => !t.FromWua && t.IsEncrypted));
+            using (var writer = new ZArchiveWriter(temp) { CompressionThreads = compressThreads })
             {
                 foreach (var title in titles)
                 {
@@ -119,7 +130,7 @@ public static class WuaBuilder
                     writer.AddDirectory(title.ArchiveFolder);
                     void Progress(long n) { done += n; options.Progress?.Invoke(0.85 * done / total); }
                     if (title.FromWua) CopyFromWua(writer, title, hashes, Progress, token);
-                    else if (title.IsEncrypted) CopyFromEncrypted(writer, title, keys, hashes, Progress, options);
+                    else if (title.IsEncrypted) CopyFromEncrypted(writer, title, keys, hashes, Progress, options, decryptThreads);
                     else CopyFromFolder(writer, title, hashes, Progress, token);
                 }
                 options.Stage?.Invoke("Finishing");
@@ -128,7 +139,7 @@ public static class WuaBuilder
             sw.Stop();
 
             options.Stage?.Invoke("Verifying");
-            Verify(temp, hashes, f => options.Progress?.Invoke(0.85 + 0.15 * f), token);
+            Verify(temp, hashes, threads, f => options.Progress?.Invoke(0.85 + 0.15 * f), token);
             File.Move(temp, output, overwrite: true);
         }
         catch
@@ -144,14 +155,21 @@ public static class WuaBuilder
     /// footer's SHA-256 over the whole file, then every file decompressed and
     /// compared, by SHA-256, with <paramref name="expected"/> (archive path to
     /// SHA-256 of what went in). Both come from one pass over the file (see
-    /// <see cref="ZArchiveReader.HashFiles"/>).
+    /// <see cref="ZArchiveReader.HashFiles(HashAlgorithmName, int, Action{long}?, CancellationToken)"/>).
     /// </summary>
-    public static void Verify(string archive, IReadOnlyDictionary<string, byte[]> expected, Action<double>? progress = null, CancellationToken token = default)
+    public static void Verify(string archive, IReadOnlyDictionary<string, byte[]> expected, Action<double>? progress = null, CancellationToken token = default) =>
+        Verify(archive, expected, 0, progress, token);
+
+    /// <summary>
+    /// <see cref="Verify(string, IReadOnlyDictionary{string, byte[]}, Action{double}?, CancellationToken)"/>
+    /// decompressing on at most <paramref name="threads"/> threads (0: one per processor).
+    /// </summary>
+    public static void Verify(string archive, IReadOnlyDictionary<string, byte[]> expected, int threads, Action<double>? progress = null, CancellationToken token = default)
     {
         using var reader = ZArchiveReader.Open(archive);
         long done = 0;
         var total = Math.Max(1, reader.Length);
-        var found = reader.HashFiles(HashAlgorithmName.SHA256, n => { done += n; progress?.Invoke(Math.Min(1, (double)done / total)); }, token);
+        var found = reader.HashFiles(HashAlgorithmName.SHA256, threads, n => { done += n; progress?.Invoke(Math.Min(1, (double)done / total)); }, token);
         if (!found.IntegrityOk)
             throw new ZArchiveException("The new archive's SHA-256 doesn't match its contents.");
 
@@ -167,6 +185,21 @@ public static class WuaBuilder
         if (seen != expected.Count)
             throw new ZArchiveException($"The new archive holds {seen} files; {expected.Count} went in.");
         progress?.Invoke(1);
+    }
+
+    /// <summary>
+    /// Splits a build's <paramref name="threads"/> between decrypting (the
+    /// calling thread and its helpers) and compressing, which run at the same
+    /// time only when a title is encrypted. With one compression thread the
+    /// writer compresses on the calling thread, so the two never add up past
+    /// the budget.
+    /// </summary>
+    internal static (int Decrypt, int Compress) SplitThreads(int threads, bool decrypting)
+    {
+        threads = Math.Max(1, threads);
+        if (!decrypting || threads == 1) return (1, threads);
+        var decrypt = Math.Max(1, threads / 4);
+        return (decrypt, Math.Max(1, threads - decrypt));
     }
 
     /// <summary>The size of a title's files, uncompressed (what packing it reads).</summary>
@@ -230,10 +263,11 @@ public static class WuaBuilder
     /// an NUS title's raw contents are first checked against its TMD.
     /// </summary>
     private static void CopyFromEncrypted(ZArchiveWriter writer, WiiUTitle title, WiiUKeys keys, Dictionary<string, byte[]> hashes,
-        Action<long> progress, WuaBuildOptions options)
+        Action<long> progress, WuaBuildOptions options, int decryptThreads)
     {
         var token = options.CancellationToken;
         using var opened = WiiUTitles.OpenEncrypted(title.SourcePath, title.Source, keys);
+        opened.Volume.DecryptThreads = decryptThreads;
         if (opened.Contents is { } contents)
         {
             options.Stage?.Invoke($"Checking {title.KindText} contents");

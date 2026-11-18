@@ -260,4 +260,15 @@ public sealed class WuaBuilderTests(Samples s) : IDisposable
         Assert.Equal(2, WiiUTitles.FromWua(output).Count);
         Assert.Equal(2, debug.Count);
     }
+
+    [Theory]
+    [InlineData(1, false, 1, 1)]
+    [InlineData(8, false, 1, 8)]
+    [InlineData(1, true, 1, 1)]
+    [InlineData(2, true, 1, 1)]
+    [InlineData(4, true, 1, 3)]
+    [InlineData(8, true, 2, 6)]
+    [InlineData(16, true, 4, 12)]
+    public void Threads_are_split_between_decrypting_and_compressing(int threads, bool decrypting, int decrypt, int compress) =>
+        Assert.Equal((decrypt, compress), WuaBuilder.SplitThreads(threads, decrypting));
 }
