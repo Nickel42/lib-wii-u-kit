@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Thread limits that hold:** `ZArchiveWriter.CompressionThreads` now caps
+  how many blocks compress at once; before, up to four times that many could
+  run together on the thread pool.
+- **`WuaBuildOptions.Threads`:** caps the whole .wua build (default 0, one per
+  processor). Packing an NUS title or disc image gives about a quarter of the
+  threads to decrypting and the rest to compressing; verifying decompresses on
+  all of them; 1 does everything on the calling thread. The .wua is byte for
+  byte the same whatever the count.
+- **New overloads:** `ZArchiveReader.HashFiles(algorithm, threads, ...)` and
+  `WuaBuilder.Verify(archive, expected, threads, ...)` cap decompression;
+  `FstVolume.DecryptThreads` caps hashed-block decryption. The old overloads
+  keep using every processor.
+
 ## 1.0.0-rc.2 (2026-11-16)
 
 - **Faster packing:** `ZArchiveWriter` compresses blocks on several threads

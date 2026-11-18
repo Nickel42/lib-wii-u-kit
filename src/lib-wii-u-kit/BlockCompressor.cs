@@ -7,8 +7,9 @@ namespace LibWiiUKit;
 /// Compresses ZArchive blocks on the thread pool while the writer fills the
 /// next ones, and hands them back in the order they were submitted. Each
 /// block is its own one-shot zstd frame at the archive's level, so the bytes
-/// are the same as compressing them one after another on one thread. Not
-/// thread-safe: one writer submits and drains.
+/// are the same as compressing them one after another on one thread. At most
+/// the given number of blocks are compressed at once. Not thread-safe: one
+/// writer submits and drains.
 /// </summary>
 internal sealed class BlockCompressor : IDisposable
 {
@@ -28,11 +29,14 @@ internal sealed class BlockCompressor : IDisposable
     private readonly Queue<Job> _inFlight = new();
     private readonly Stack<Job> _free = new();
     private readonly ConcurrentBag<Compressor> _compressors = [];
+    private readonly ConcurrentExclusiveSchedulerPair _workers;
 
     public BlockCompressor(int threads)
     {
-        // A few blocks per thread keeps every worker busy while the oldest is written.
+        // A few blocks per thread keeps every worker busy while the oldest is written;
+        // the scheduler runs no more than `threads` of them at a time.
         _maxInFlight = threads * 4;
+        _workers = new ConcurrentExclusiveSchedulerPair(TaskScheduler.Default, threads);
     }
 
     /// <summary>
@@ -56,7 +60,8 @@ internal sealed class BlockCompressor : IDisposable
             job = new Job(block, new byte[CompressBound]);
             next = new byte[ZArchiveFormat.BlockSize];
         }
-        job.Task = Task.Run(() => job.Size = Compress(job.Input, job.Output));
+        job.Task = Task.Factory.StartNew(() => job.Size = Compress(job.Input, job.Output),
+            CancellationToken.None, TaskCreationOptions.DenyChildAttach, _workers.ConcurrentScheduler);
         _inFlight.Enqueue(job);
         return next;
     }
@@ -77,11 +82,23 @@ internal sealed class BlockCompressor : IDisposable
         _free.Push(job);
     }
 
+    private int _running;
+
+    /// <summary>The most blocks seen compressing at once (for tests).</summary>
+    internal int PeakRunning;
+
     private int Compress(byte[] input, byte[] output)
     {
+        var now = Interlocked.Increment(ref _running);
+        for (var peak = Volatile.Read(ref PeakRunning); now > peak; peak = Volatile.Read(ref PeakRunning))
+            if (Interlocked.CompareExchange(ref PeakRunning, now, peak) == peak) break;
         if (!_compressors.TryTake(out var zstd)) zstd = new Compressor(ZArchiveFormat.ZstdLevel);
         try { return zstd.Wrap(input, output); }
-        finally { _compressors.Add(zstd); }
+        finally
+        {
+            _compressors.Add(zstd);
+            Interlocked.Decrement(ref _running);
+        }
     }
 
     public void Dispose()
@@ -92,6 +109,7 @@ internal sealed class BlockCompressor : IDisposable
             try { job.Task?.Wait(); } catch (AggregateException) { }
         }
         _inFlight.Clear();
+        _workers.Complete();
         while (_compressors.TryTake(out var zstd)) zstd.Dispose();
     }
 }

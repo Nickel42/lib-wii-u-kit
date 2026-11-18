@@ -56,6 +56,18 @@ public sealed class FstVolume : IDisposable
 
     public IReadOnlyList<FstEntry> Entries { get; }
 
+    /// <summary>
+    /// How many threads decrypt and check hashed blocks at once, the calling
+    /// thread included (default 0: one per processor). The output is the same
+    /// whatever this is; 1 does it all on the calling thread.
+    /// </summary>
+    public int DecryptThreads
+    {
+        get => _decryptThreads;
+        set => _decryptThreads = Math.Clamp(value, 0, 256);
+    }
+    private int _decryptThreads;
+
     private FstVolume(IClusterSource source, byte[] key, uint offsetFactor, List<Cluster> clusters, List<FstEntry> entries)
     {
         _source = source;
@@ -239,7 +251,8 @@ public sealed class FstVolume : IDisposable
             return;
         }
         var failed = long.MaxValue;
-        Parallel.For(0, count, i =>
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = _decryptThreads > 0 ? _decryptThreads : Environment.ProcessorCount };
+        Parallel.For(0, count, parallel, i =>
         {
             if (!DecryptHashedBlock(key, first + i, cipher.AsSpan(i * HashedBlock, HashedBlock), plain.AsSpan(i * HashedData, HashedData)))
                 InterlockedMin(ref failed, first + i);

@@ -311,4 +311,41 @@ public sealed class ZArchiveTests : IDisposable
         Assert.Throws<IOException>(() => new ZArchiveWriter(path).Dispose());
         Assert.Equal("mine", File.ReadAllText(path));
     }
+
+    [Fact]
+    public void Block_compressor_runs_no_more_than_its_threads_at_once()
+    {
+        var block = WiiUSample.Text(ZArchiveFormat.BlockSize);
+        foreach (var threads in new[] { 1, 2, 3 })
+        {
+            using var c = new BlockCompressor(threads);
+            var stored = 0;
+            var next = block.ToArray();
+            for (var i = 0; i < 60; i++)
+            {
+                block.CopyTo(next, 0);
+                next = c.Submit(next, (_, _, _) => stored++);
+            }
+            c.Drain((_, _, _) => stored++);
+            Assert.Equal(60, stored);
+            Assert.InRange(c.PeakRunning, 1, threads);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(0)]
+    public void HashFiles_gives_the_same_hashes_on_any_number_of_threads(int threads)
+    {
+        var (archive, _) = Write();
+        using var r = ZArchiveReader.Open(archive);
+        var all = r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        long read = 0;
+        var capped = r.HashFiles(System.Security.Cryptography.HashAlgorithmName.SHA256, threads, n => read += n);
+        Assert.True(capped.IntegrityOk);
+        Assert.Equal(r.Length, read);
+        Assert.Equal(all.Files.Keys.Order(), capped.Files.Keys.Order());
+        Assert.All(all.Files, f => Assert.Equal(f.Value, capped.Files[f.Key]));
+    }
 }

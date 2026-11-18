@@ -359,4 +359,12 @@ public sealed class EncryptedTests(Samples s) : IDisposable
         Assert.ThrowsAny<OperationCanceledException>(() => WuaBuilder.Build([s.NusGame], Samples.EncBase, dir, options));
         Assert.Empty(Directory.GetFiles(dir));
     }
+
+    [Fact]
+    public void One_thread_or_many_build_the_same_wua()
+    {
+        var one = WuaBuilder.Build([s.Wud, s.NusUpdate], Samples.EncBase, _scratch.Dir("one"), new WuaBuildOptions { Keys = s.Keys, Threads = 1 });
+        var many = WuaBuilder.Build([s.Wud, s.NusUpdate], Samples.EncBase, _scratch.Dir("many"), new WuaBuildOptions { Keys = s.Keys, Threads = 8 });
+        Assert.Equal(File.ReadAllBytes(one.Output), File.ReadAllBytes(many.Output));
+    }
 }
