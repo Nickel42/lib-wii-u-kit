@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0-rc.3 (2026-11-18)
 
 - **Thread limits that hold:** `ZArchiveWriter.CompressionThreads` now caps
   how many blocks compress at once; before, up to four times that many could

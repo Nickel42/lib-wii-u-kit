@@ -10,7 +10,7 @@
 
     <!-- Versioning: release builds pass -p:Version=x.y.z from the git tag. -->
     <VersionPrefix>1.0.0</VersionPrefix>
-    <VersionSuffix>rc.2</VersionSuffix>
+    <VersionSuffix>rc.3</VersionSuffix>
 
     <!-- Package metadata -->
     <Authors>Nickel42</Authors>
